@@ -1,0 +1,84 @@
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: certificate_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d certificate_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment: &app_environment
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/certificate_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      GENERATED_CERTIFICATES_DIR: /certificates
+      MAX_RECIPIENTS_PER_JOB: "1000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt 'psycopg[binary]'
+      && alembic upgrade head"
+
+  api:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - certificates_data:/certificates
+    environment: *app_environment
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt 'psycopg[binary]'
+      && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - certificates_data:/certificates
+    environment: *app_environment
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt 'psycopg[binary]'
+      && celery -A app.workers.tasks:celery_app worker -l info"
+
+volumes:
+  postgres_data:
+  certificates_data:
